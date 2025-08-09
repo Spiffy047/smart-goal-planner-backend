@@ -139,17 +139,67 @@ app.get('/users', verifyToken, checkAdmin, async (req, res) => {
       username: doc.data().username,
       role: doc.data().role,
     }));
-    res.json(userList);
+    // Also include a count of all users as requested
+    res.json({ users: userList, totalUsers: userList.length });
   } catch (error) {
     console.error('Error fetching users:', error);
     res.status(500).send('Server error fetching users.');
   }
 });
 
-// New endpoint to get goals for the authenticated user
+// NEW: Admin-only endpoint to delete a user
+app.delete('/users/:id', verifyToken, checkAdmin, async (req, res) => {
+  const userIdToDelete = req.params.id;
+  try {
+    // Before deleting the user, delete all of their goals
+    const userGoalsRef = db.collection('goals').where('userId', '==', userIdToDelete);
+    const goalsToDelete = await userGoalsRef.get();
+    const batch = db.batch();
+    goalsToDelete.docs.forEach((doc) => {
+      batch.delete(doc.ref);
+    });
+    await batch.commit();
+
+    await db.collection('users').doc(userIdToDelete).delete();
+    res.status(200).send('User and associated goals deleted successfully.');
+  } catch (error) {
+    console.error('Error deleting user:', error);
+    res.status(500).send('Server error deleting user.');
+  }
+});
+
+// NEW: Endpoint to create a new goal for the authenticated user
+app.post('/goals', verifyToken, async (req, res) => {
+  const { name, targetAmount, savedAmount, category } = req.body;
+  const userId = req.user.id;
+  
+  if (!name || !targetAmount || !savedAmount || !category) {
+    return res.status(400).send('All goal fields are required.');
+  }
+
+  try {
+    const newGoal = {
+      name,
+      targetAmount,
+      savedAmount,
+      category,
+      userId,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    const docRef = await db.collection('goals').add(newGoal);
+    res.status(201).json({ id: docRef.id, ...newGoal });
+  } catch (error) {
+    console.error('Error creating goal:', error);
+    res.status(500).send('Server error creating goal.');
+  }
+});
+
+// UPDATED: Endpoint to get goals for the authenticated user
 app.get('/goals', verifyToken, async (req, res) => {
   try {
-    const goalsSnapshot = await db.collection('goals').get();
+    // Only fetch goals where the 'userId' field matches the authenticated user's ID
+    const goalsSnapshot = await db.collection('goals').where('userId', '==', req.user.id).get();
     const goalsList = goalsSnapshot.docs.map(doc => ({
       id: doc.id,
       ...doc.data()
@@ -160,6 +210,58 @@ app.get('/goals', verifyToken, async (req, res) => {
     res.status(500).send('Server error fetching goals.');
   }
 });
+
+// NEW: Endpoint to update an existing goal for the authenticated user
+app.put('/goals/:id', verifyToken, async (req, res) => {
+  const goalId = req.params.id;
+  const userId = req.user.id;
+  const { name, targetAmount, savedAmount, category } = req.body;
+
+  try {
+    const goalRef = db.collection('goals').doc(goalId);
+    const goalDoc = await goalRef.get();
+
+    if (!goalDoc.exists || goalDoc.data().userId !== userId) {
+      return res.status(403).send('Forbidden: You can only update your own goals.');
+    }
+
+    const updatedGoal = {
+      name,
+      targetAmount,
+      savedAmount,
+      category,
+      updatedAt: new Date().toISOString()
+    };
+
+    await goalRef.update(updatedGoal);
+    res.status(200).send('Goal updated successfully.');
+  } catch (error) {
+    console.error('Error updating goal:', error);
+    res.status(500).send('Server error updating goal.');
+  }
+});
+
+// NEW: Endpoint to delete a goal for the authenticated user
+app.delete('/goals/:id', verifyToken, async (req, res) => {
+  const goalId = req.params.id;
+  const userId = req.user.id;
+
+  try {
+    const goalRef = db.collection('goals').doc(goalId);
+    const goalDoc = await goalRef.get();
+    
+    if (!goalDoc.exists || goalDoc.data().userId !== userId) {
+      return res.status(403).send('Forbidden: You can only delete your own goals.');
+    }
+
+    await goalRef.delete();
+    res.status(200).send('Goal deleted successfully.');
+  } catch (error) {
+    console.error('Error deleting goal:', error);
+    res.status(500).send('Server error deleting goal.');
+  }
+});
+
 
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
