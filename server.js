@@ -10,15 +10,17 @@ app.use(cors());
 app.use(express.json());
 
 // --- Firebase and Firestore Initialization ---
-// The __firebase_config and __app_id are provided by the Canvas environment.
-const firebaseConfig = JSON.parse(process.env.__firebase_config);
-const appId = process.env.__app_id;
+let firebaseConfig;
+
+// Check for the standard environment variable used in production
+if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
+  firebaseConfig = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+} else {
+  // Fallback for the Canvas environment
+  firebaseConfig = JSON.parse(process.env.__firebase_config);
+}
 
 // Initialize Firebase Admin SDK
-// You would typically use a service account key file here, but for this environment,
-// we assume the configuration is passed via environment variables.
-// The code below is a simplified setup. In a production app on Render, you'd
-// set up a Service Account and use the FIREBASE_SERVICE_ACCOUNT_KEY env var.
 if (admin.apps.length === 0) {
   admin.initializeApp({
     credential: admin.credential.cert(firebaseConfig),
