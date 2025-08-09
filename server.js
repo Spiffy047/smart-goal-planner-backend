@@ -1,73 +1,186 @@
+// A Node.js/Express server using Supabase for persistent user data.
+
 const express = require('express');
-const bodyParser = require('body-parser');
 const cors = require('cors');
-const admin = require('firebase-admin');
-
+const { createClient } = require('@supabase/supabase-js');
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3001;
 
-app.use(bodyParser.json());
 app.use(cors());
+app.use(express.json());
 
-// --- Firebase Admin SDK Initialization ---
-// IMPORTANT: Make sure to set the FIREBASE_SERVICE_ACCOUNT_KEY environment variable on Render
-// with the JSON content of your service account file.
-try {
-  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
-  });
-  console.log("Firebase Admin SDK initialized successfully.");
-} catch (error) {
-  console.error("Failed to initialize Firebase Admin SDK. Please check your FIREBASE_SERVICE_ACCOUNT_KEY environment variable:", error);
-}
+// --- Supabase Client Initialization ---
+// NOTE: For security, these should be environment variables in production.
+// Replace these with your actual Supabase project URL and service role key.
+// The service role key is for server-side access and bypasses RLS.
+const SUPABASE_URL = process.env.SUPABASE_URL || "YOUR_SUPABASE_URL";
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "YOUR_SUPABASE_SERVICE_ROLE_KEY";
 
-// --- Authentication Middleware ---
-const authenticate = async (req, res, next) => {
-  const idToken = req.headers.authorization?.split('Bearer ')[1];
-  if (!idToken) {
-    return res.status(401).json({ error: 'Unauthorized: No token provided' });
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+// --- Mock JWT and Authentication Logic ---
+// This is a simple token verification using Supabase auth.
+const verifyToken = async (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  if (!authHeader) {
+    return res.status(401).send('No token provided');
   }
 
+  const token = authHeader.split(' ')[1];
   try {
-    const decodedToken = await admin.auth().verifyIdToken(idToken);
-    req.user = decodedToken;
+    // Verify the JWT token using Supabase's built-in functionality
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+
+    if (error) {
+      return res.status(401).send('Invalid token.');
+    }
+    req.user = { id: user.id }; // Attach the user ID to the request object
     next();
   } catch (error) {
-    console.error('Error verifying Firebase ID token:', error);
-    res.status(401).json({ error: 'Unauthorized: Invalid or expired token' });
+    console.error('Error verifying token:', error);
+    res.status(500).send('Server error during token verification.');
   }
 };
 
-// --- Protected API Routes ---
-// Apply the 'authenticate' middleware to any route that requires a logged-in user.
-app.get('/api/user/profile', authenticate, async (req, res) => {
+// --- API Endpoints ---
+// Endpoint to get all goals for the authenticated user
+app.get('/goals', verifyToken, async (req, res) => {
+  const userId = req.user.id;
   try {
-    const userProfile = await admin.firestore().collection('users').doc(req.user.uid).get();
-    if (!userProfile.exists) {
-      return res.status(404).json({ error: 'User profile not found' });
+    const { data, error } = await supabase
+      .from('goals')
+      .select('*')
+      .eq('user_id', userId);
+
+    if (error) {
+      console.error('Error fetching goals:', error);
+      return res.status(500).send('Server error fetching goals.');
     }
-    res.status(200).json(userProfile.data());
+    res.status(200).json(data);
   } catch (error) {
-    console.error("Error fetching user profile:", error);
-    res.status(500).json({ error: 'Internal Server Error' });
+    console.error('Error fetching goals:', error);
+    res.status(500).send('Server error fetching goals.');
   }
 });
 
-// Example route for a front-end registration form
-app.post('/api/user/register', async (req, res) => {
-    try {
-      const { email, password } = req.body;
-      const userRecord = await admin.auth().createUser({ email, password });
-      await admin.firestore().collection('users').doc(userRecord.uid).set({
-        email: userRecord.email,
-        createdAt: new Date()
-      });
-      res.status(201).json({ message: 'User registered successfully!' });
-    } catch (error) {
-      console.error("Error registering new user:", error);
-      res.status(500).json({ error: 'Internal Server Error' });
+// Endpoint to add a new goal for the authenticated user
+app.post('/goals', verifyToken, async (req, res) => {
+  const userId = req.user.id;
+  const newGoal = {
+    ...req.body,
+    user_id: userId,
+    created_at: new Date().toISOString(),
+    saved_amount: req.body.saved_amount || 0, // Ensure saved amount has a default
+  };
+
+  try {
+    const { data, error } = await supabase
+      .from('goals')
+      .insert([newGoal])
+      .select();
+
+    if (error) {
+      console.error('Error adding goal:', error);
+      return res.status(500).send('Server error adding goal.');
     }
+    res.status(201).json(data[0]);
+  } catch (error) {
+    console.error('Error adding goal:', error);
+    res.status(500).send('Server error adding goal.');
+  }
+});
+
+// Endpoint to update a goal for the authenticated user
+app.put('/goals/:id', verifyToken, async (req, res) => {
+  const goalId = req.params.id;
+  const userId = req.user.id;
+  const { name, target_amount, saved_amount, category, target_date } = req.body;
+
+  try {
+    const { data, error } = await supabase
+      .from('goals')
+      .update({
+        name,
+        target_amount,
+        saved_amount,
+        category,
+        target_date,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', goalId)
+      .eq('user_id', userId)
+      .select();
+
+    if (error) {
+      console.error('Error updating goal:', error);
+      return res.status(500).send('Server error updating goal.');
+    }
+
+    if (!data || data.length === 0) {
+      return res.status(404).send('Goal not found or unauthorized.');
+    }
+    res.status(200).json(data[0]);
+  } catch (error) {
+    console.error('Error updating goal:', error);
+    res.status(500).send('Server error updating goal.');
+  }
+});
+
+// Endpoint to delete a goal for the authenticated user
+app.delete('/goals/:id', verifyToken, async (req, res) => {
+  const goalId = req.params.id;
+  const userId = req.user.id;
+
+  try {
+    const { data, error } = await supabase
+      .from('goals')
+      .delete()
+      .eq('id', goalId)
+      .eq('user_id', userId)
+      .select();
+    
+    if (error) {
+      console.error('Error deleting goal:', error);
+      return res.status(500).send('Server error deleting goal.');
+    }
+
+    if (!data || data.length === 0) {
+      return res.status(404).send('Goal not found or unauthorized.');
+    }
+    res.status(200).send('Goal deleted successfully.');
+  } catch (error) {
+    console.error('Error deleting goal:', error);
+    res.status(500).send('Server error deleting goal.');
+  }
+});
+
+// Endpoint to make a deposit to a goal (uses PATCH)
+app.patch('/goals/:id', verifyToken, async (req, res) => {
+  const goalId = req.params.id;
+  const userId = req.user.id;
+  const { saved_amount } = req.body;
+
+  try {
+    const { data, error } = await supabase
+      .from('goals')
+      .update({ saved_amount: saved_amount, updated_at: new Date().toISOString() })
+      .eq('id', goalId)
+      .eq('user_id', userId)
+      .select();
+
+    if (error) {
+      console.error('Error updating goal:', error);
+      return res.status(500).send('Server error updating goal.');
+    }
+
+    if (!data || data.length === 0) {
+      return res.status(404).send('Goal not found or unauthorized.');
+    }
+    res.status(200).json(data[0]);
+  } catch (error) {
+    console.error('Error updating goal:', error);
+    res.status(500).send('Server error updating goal.');
+  }
 });
 
 app.listen(PORT, () => {
